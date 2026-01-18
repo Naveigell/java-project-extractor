@@ -2,8 +2,10 @@ import com.github.javaparser.*;
 import com.github.javaparser.ast.*;
 import com.github.javaparser.ast.body.*;
 import com.github.javaparser.ast.expr.*;
+import com.github.javaparser.ast.type.*;
 
 import java.io.*;
+import java.nio.file.*;
 import java.util.*;
 
 public class DependencyExtractorToCSV {
@@ -11,18 +13,22 @@ public class DependencyExtractorToCSV {
     static List<String> classList = new ArrayList<>();
     static Map<String, Integer> indexMap = new HashMap<>();
 
-    static int[][] CA, CI, CM, MM;
+    static int[][] CA; // Class-Attribute + Object Creation
+    static int[][] CI; // Class Inheritance / Implementation
+    static int[][] CM; // Class-Method Signature
+    static int[][] MM; // Method-Method (via method call scope)
 
     public static void main(String[] args) throws Exception {
 
-        Map<String, String> projects = new HashMap<>();
+        Map<String, String> projects = new LinkedHashMap<>();
 
-        projects.put("ant", "/Users/yosuayerikho/IdeaProjects/DepedencyExtractor/java_project/ant/src/main/org/apache/tools/ant");
-        projects.put("argouml", "/Users/yosuayerikho/IdeaProjects/DepedencyExtractor/java_project/argouml/src/argouml-app/src/org/argouml");
-        projects.put("jEdit", "/Users/yosuayerikho/IdeaProjects/DepedencyExtractor/java_project/jEdit/org/gjt/sp/jedit");
-        projects.put("jhotdraw", "/Users/yosuayerikho/IdeaProjects/DepedencyExtractor/java_project/jhotdraw/jhotdraw-core/src/main/java/org/jhotdraw/draw");
-        projects.put("jmeter", "/Users/yosuayerikho/IdeaProjects/DepedencyExtractor/java_project/jmeter/src/core/src/main/java/org/apache/jmeter");
-        projects.put("wro4j", "/Users/yosuayerikho/IdeaProjects/DepedencyExtractor/java_project/wro4j/wro4j-core/src/main/java/ro/isdc/wro");
+//        projects.put("ant", "/Users/yosuayerikho/IdeaProjects/DepedencyExtractor/java_project/ant/src/main/org/apache/tools/ant");
+//        projects.put("argouml", "/Users/yosuayerikho/IdeaProjects/DepedencyExtractor/java_project/argouml/src/argouml-app/src/org/argouml");
+//        projects.put("jEdit", "/Users/yosuayerikho/IdeaProjects/DepedencyExtractor/java_project/jEdit/org/gjt/sp/jedit");
+//        projects.put("jhotdraw", "/Users/yosuayerikho/IdeaProjects/DepedencyExtractor/java_project/jhotdraw/jhotdraw-core/src/main/java/org/jhotdraw/draw");
+//        projects.put("jmeter", "/Users/yosuayerikho/IdeaProjects/DepedencyExtractor/java_project/jmeter/src/core/src/main/java/org/apache/jmeter");
+//        projects.put("wro4j", "/Users/yosuayerikho/IdeaProjects/DepedencyExtractor/java_project/wro4j/wro4j-core/src/main/java/ro/isdc/wro");
+        projects.put("paper", "/Users/yosuayerikho/IdeaProjects/DepedencyExtractor/java_project/Paper/src/main/java");
 
         ParserConfiguration config = new ParserConfiguration();
         StaticJavaParser.setConfiguration(config);
@@ -39,7 +45,6 @@ public class DependencyExtractorToCSV {
             List<ClassOrInterfaceDeclaration> classes = new ArrayList<>();
             parseFolder(new File(SOURCE_ROOT), classes);
 
-            // indexing class names
             for (ClassOrInterfaceDeclaration c : classes) {
                 String name = c.getNameAsString();
                 if (!indexMap.containsKey(name)) {
@@ -55,8 +60,7 @@ public class DependencyExtractorToCSV {
             MM = new int[n][n];
 
             for (ClassOrInterfaceDeclaration clazz : classes) {
-                String src = clazz.getNameAsString();
-                int i = indexMap.get(src);
+                int i = indexMap.get(clazz.getNameAsString());
 
                 extractCA(clazz, i);
                 extractCI(clazz, i);
@@ -69,11 +73,9 @@ public class DependencyExtractorToCSV {
             writeCSV(OUTPUT_DIR + "/CMInteractionMatrix.csv", CM);
             writeCSV(OUTPUT_DIR + "/MMInteractionMatrix.csv", MM);
 
-            System.out.printf("CSV %s created.%n", entry.getKey());
+            System.out.println("CSV created for project: " + entry.getKey());
         }
     }
-
-    // ===================== PARSER =====================
 
     static void parseFolder(File folder, List<ClassOrInterfaceDeclaration> classes) {
         File[] files = folder.listFiles();
@@ -87,7 +89,7 @@ public class DependencyExtractorToCSV {
                     CompilationUnit cu = StaticJavaParser.parse(f);
                     classes.addAll(cu.findAll(ClassOrInterfaceDeclaration.class));
                 } catch (Exception e) {
-                    System.err.println("Skip file: " + f.getPath());
+                    // intentionally skipped
                 }
             }
         }
@@ -95,8 +97,11 @@ public class DependencyExtractorToCSV {
 
     static void extractCA(ClassOrInterfaceDeclaration clazz, int i) {
         for (FieldDeclaration field : clazz.getFields()) {
-            String typeName = field.getElementType().asString();
-            addEdge(i, typeName, CA);
+            addEdge(i, field.getElementType().asString(), CA);
+        }
+
+        for (ObjectCreationExpr oce : clazz.findAll(ObjectCreationExpr.class)) {
+            addEdge(i, oce.getType().asString(), CA);
         }
     }
 
@@ -120,9 +125,11 @@ public class DependencyExtractorToCSV {
 
     static void extractMM(ClassOrInterfaceDeclaration clazz, int i) {
         for (MethodCallExpr call : clazz.findAll(MethodCallExpr.class)) {
-            call.getScope().ifPresent(scope ->
-                    addEdge(i, scope.toString(), MM)
-            );
+            call.getScope().ifPresent(scope -> {
+                if (scope.isNameExpr()) {
+                    addEdge(i, scope.asNameExpr().getNameAsString(), MM);
+                }
+            });
         }
     }
 
@@ -138,13 +145,18 @@ public class DependencyExtractorToCSV {
             clean = clean.substring(clean.lastIndexOf('.') + 1);
         }
 
-        if (indexMap.containsKey(clean)) {
-            int j = indexMap.get(clean);
-            matrix[i][j]++;
-        }
+        if (clean.isEmpty()) return;
+        if (Character.isLowerCase(clean.charAt(0))) return;
+        if (!indexMap.containsKey(clean)) return;
+
+        int j = indexMap.get(clean);
+
+        if (i == j) return;
+
+        matrix[i][j]++;
     }
 
-    static void writeCSV(String path, int[][] matrix) throws Exception {
+    static void writeCSV(String path, int[][] matrix) throws IOException {
         BufferedWriter bw = new BufferedWriter(new FileWriter(path));
 
         bw.write("Class");
